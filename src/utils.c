@@ -16,7 +16,7 @@ int set_nonblock(int sockfd) {
     return 0;
 }
 
-// TODO: napravi bolje resenje za logiranje, ovo je temporary
+/* simple logging func */
 void logg(const char* format, ...) {
     va_list args;
     va_start(args, format);

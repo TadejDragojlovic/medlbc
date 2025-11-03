@@ -14,8 +14,6 @@
 #include <sys/epoll.h>
 #include <wait.h>
 
-#define PORT "3456"
-#define BACKLOG 10
 #define MAXEVENTS 64
 
 int get_server_socket();

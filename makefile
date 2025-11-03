@@ -1,11 +1,13 @@
 INCDIR = include
 SRCDIR = src
 
+SRC_FILES := $(wildcard $(SRCDIR)/*.c)
+
 # https://www.cs.colby.edu/maxwell/courses/tutorials/maketutor/
 
 default: loadbalancer
 
-loadbalancer: $(SRCDIR)/lb.c $(SRCDIR)/utils.c $(SRCDIR)/worker.c $(SRCDIR)/connection.c
+loadbalancer: $(SRC_FILES)
 	gcc -o loadbalancer -I$(INCDIR) $^
 
 clean:
