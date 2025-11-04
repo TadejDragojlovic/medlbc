@@ -1,4 +1,4 @@
-#include "dummy_backend.h"
+#include "server.h"
 #define BUF_SIZE 256
 
 /* Simple TCP Echo server */
