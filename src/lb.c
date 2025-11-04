@@ -9,7 +9,7 @@
 int main(int argc, char* argv[]) {
     int listenerfd;
 
-    if((listenerfd = create_server_socket(PORT)) == -1) exit(1);
+    if((listenerfd = create_server_socket(PORT, 1)) == -1) exit(1);
     if(server_listen(listenerfd) == -1) exit(1);
 
     // 1. Master process starts up N_WORKERS

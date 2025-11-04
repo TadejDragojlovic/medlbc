@@ -1,7 +1,7 @@
 #include "server.h"
 
-/* returns the socket fd [int] for the server, set to non-blocking */
-int create_server_socket(char* port) {
+/* returns the socket fd [int] for the server, sets to non-blocking if flag argument is 1 */
+int create_server_socket(char* port, int set_nonblocking) {
     int sockfd, rv, reuse_opt=1;
     struct addrinfo hints, *serverinfo, *t;
 
@@ -23,9 +23,11 @@ int create_server_socket(char* port) {
         }
 
         // set nonblocking
-        if(set_nonblock(sockfd) == -1) {
-            close(sockfd);
-            continue;
+        if(set_nonblocking == 1) {
+            if(set_nonblock(sockfd) == -1) {
+                close(sockfd);
+                continue;
+            }
         }
 
         // options
@@ -64,4 +66,23 @@ int server_listen(int sockfd) {
     }
 
     return 0;
+}
+
+/* Persistent `send` function */
+ssize_t send_all(int destfd, char* buf, ssize_t len) {
+    ssize_t sent, total_sent=0;
+
+    while(len > 0) {
+        if((sent = send(destfd, buf+total_sent, len, 0)) == -1) {
+            perror("sendall");
+
+            if(errno == EINTR) continue;
+            return -1;
+        }
+
+        total_sent += sent;
+        len -= sent;
+    }
+
+    return total_sent;
 }

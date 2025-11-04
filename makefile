@@ -5,10 +5,15 @@ SRC_FILES := $(wildcard $(SRCDIR)/*.c)
 
 # https://www.cs.colby.edu/maxwell/courses/tutorials/maketutor/
 
-default: loadbalancer
+default: all
 
-loadbalancer: $(SRC_FILES)
+all: loadbalancer backend_server
+
+loadbalancer: $(filter-out $(SRCDIR)/dummy_backend.c, $(SRC_FILES))
 	gcc -o loadbalancer -I$(INCDIR) $^
 
+backend_server: $(SRCDIR)/dummy_backend.c $(SRCDIR)/server.c $(SRCDIR)/utils.c
+	gcc -o backend_server -I$(INCDIR) $^
+
 clean:
-	rm -f loadbalancer *.o
+	rm -f loadbalancer backend_server *.o
