@@ -7,13 +7,13 @@ SRC_FILES := $(wildcard $(SRCDIR)/*.c)
 
 default: all
 
-all: loadbalancer backend_server
+all: loadbalancer upserver
 
 loadbalancer: $(filter-out $(SRCDIR)/dummy_backend.c, $(SRC_FILES))
 	gcc -o loadbalancer -I$(INCDIR) $^
 
-backend_server: $(SRCDIR)/dummy_backend.c $(SRCDIR)/server.c $(SRCDIR)/utils.c
-	gcc -o backend_server -I$(INCDIR) $^
+upserver: $(SRCDIR)/dummy_backend.c $(SRCDIR)/server.c $(SRCDIR)/utils.c
+	gcc -o upserver -I$(INCDIR) $^
 
 clean:
-	rm -f loadbalancer backend_server *.o
+	rm -f loadbalancer upserver *.o
