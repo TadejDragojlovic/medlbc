@@ -1,6 +1,12 @@
 #include "worker.h"
 #include "connection.h"
 
+// TODO: hardcoded
+static struct UpstreamServer upstream_servers[2] = {
+    { "127.0.0.1", 4445},
+    { "127.0.0.1", 4446}
+};
+
 /* Returns WorkerProcess that is already setup if everything goes well,
 otherwise it returns WorkerProcess that has "pid" attribute set to -1, error;
 utilizing pipe to obtain communication between children and parent */
@@ -77,6 +83,9 @@ int setup_worker(int listenerfd, WorkerProcess* worker) {
 
 /* job loop for the worker process, handles events */
 void employ_worker(int listenerfd, WorkerProcess* worker) {
+    // TODO: find a better solution
+    int upstream_fds[100] = {0}, num_upstream_sockets = 0;
+
     for(;;) {
         logg("WORKER [%d] - current connections (%d)", worker->pid, worker->num_conn);
 
@@ -102,28 +111,83 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
 
             // hangup
             if(worker->event_buffers[j].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
-                close_conn(worker, worker->event_buffers[j].data.fd);
+                int is_upstream = 0;
+
+                // by upstream socket
+                for(int k=0;k<num_upstream_sockets;k++) {
+                    if(upstream_fds[k] == worker->event_buffers[j].data.fd) {
+                        logg("CONNECTING TO UPSTREAM FAILED.");
+                        is_upstream = 1;
+
+                        // TODO: implement proper cleanup
+                        epoll_ctl(worker->efd, EPOLL_CTL_DEL, worker->event_buffers[j].data.fd, NULL);
+                        close(worker->event_buffers[j].data.fd);
+                        // adjusting upstream socket list
+                        int found = 0;
+                        for(int k=0;k<num_upstream_sockets;k++) {
+                            if(upstream_fds[k] == worker->event_buffers[j].data.fd) {
+                                found=1;
+                                num_upstream_sockets--;
+                            }
+
+                            if(found) upstream_fds[k] = upstream_fds[k+1];
+                        }
+                        break;
+                    }
+                }
+
+                // by client
+                if(is_upstream == 0) close_conn(worker, worker->event_buffers[j].data.fd);
+
                 continue;
             }
 
-            // data to be read
+            // client sent data, forward request to backend to process it
             if(worker->event_buffers[j].events & EPOLLIN) {
-                // TODO: ceo ovaj deo u -> `handle_client()`
-                printf("HANDLE CLIENT. TODO\n");
-
-                // Ovaj ispod kod je jos jedan nacin da se proveri da li je klijent HUP
-                /*
-                char buf[512];
-                ssize_t n = read(event_buffers[j].data.fd, buf, sizeof(buf));
-
-                if(n==0) {
-                    logg("Client %d hangup!", event_buffers[j].data.fd);
-                    close_connection(event_buffers[j].data.fd, &br_kon);
-                } else {
-                    // TODO: recv
-                    logg("Client je poslao nesto...");
+                int upstream_sockfd;
+                if((upstream_sockfd = connect_to_upstream(upstream_servers[0])) == -1) {
+                    logg("ERROR IN TRYING TO ESTABLISH A CONNECTION TO BACKEND.");
+                    continue;
                 }
-                */
+
+                // nonblocking socket for upstream
+                struct epoll_event ev = {
+                    .events = EPOLLOUT | EPOLLIN | EPOLLET,
+                    .data.fd = upstream_sockfd
+                };
+                epoll_ctl(worker->efd, EPOLL_CTL_ADD, upstream_sockfd, &ev);
+
+                upstream_fds[num_upstream_sockets++] = upstream_sockfd;
+            }
+
+            // EPOLLOUT on upstream sockets
+            if(worker->event_buffers[j].events & EPOLLOUT) {
+                int err;
+                socklen_t len = sizeof(err);
+
+                getsockopt(worker->event_buffers[j].data.fd, SOL_SOCKET, SO_ERROR, &err, &len);
+
+                // Connection succesfull
+                if(err == 0) {
+                    // TODO
+                    logg("TODO HANDLE CLIENT REQUEST");
+                } else {
+                    logg("ERROR CONNECTING TO THE UPSTREAM SERVER");
+                }
+
+                // TODO: implement proper cleanup
+                epoll_ctl(worker->efd, EPOLL_CTL_DEL, worker->event_buffers[j].data.fd, NULL);
+                close(worker->event_buffers[j].data.fd);
+                // adjusting upstream socket list
+                int found = 0;
+                for(int k=0;k<num_upstream_sockets;k++) {
+                    if(upstream_fds[k] == worker->event_buffers[j].data.fd) {
+                        found=1;
+                        num_upstream_sockets--;
+                    }
+
+                    if(found) upstream_fds[k] = upstream_fds[k+1];
+                }
 
                 continue;
             }
@@ -150,7 +214,6 @@ WorkerProcess* init_workers(int listenerfd, int n) {
     // for(int i=0;i<n;i++) {
     //     printf("worker (%d): %d\n", i, worker_array[i].pid);
     // }
-
     // logg("INITIALIZED WORKERS.");
 
     return worker_array;

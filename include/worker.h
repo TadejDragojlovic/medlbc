@@ -9,8 +9,9 @@
 #include <wait.h>
 
 #include "utils.h"
+#include "upstream.h"
 
-#define MAXEVENTS 64
+#define MAXEVENTS 64 // max numbers of fds for the epoll buffer
 
 typedef struct {
     pid_t pid;                                      // process id

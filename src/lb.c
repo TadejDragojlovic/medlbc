@@ -1,4 +1,3 @@
-#include "lb.h"
 #include "utils.h"
 #include "worker.h"
 #include "server.h"
@@ -30,16 +29,18 @@ int main(int argc, char* argv[]) {
 
 
 /* TODO: STA RADITI SAD
-1. struktura bekend servera
-    1.1 dummy_backend.c (tcp echoserver ili nesto)
-2. client.c
+1. struktura za kontekst zahteva klijenta (ClientRequestContext / ConnectionContext)
+2. refaktorisanje dela za konekciju sa upstream serverom
+    2.1 vise upstream servera istovremeno
+    2.2 algoritam za biranje upstream servera za konekciju sa klijentom (round robin load balancing)
+3. client.c ?
 
 VECI KORACI: 
 - implementacija algoritma za load balancing
-- citanje config fajla (kao nginx sto radi)
+- health check mehanizam
 
 BONUS:
-- health check mehanizam
+- citanje config fajla (kao nginx sto radi)
 - graceful exit logika za signale (child procesi)
     * da li treba da koristim `kill(pid, signal_koji_zelim)` za workere?
 */
