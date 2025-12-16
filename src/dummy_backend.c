@@ -1,5 +1,5 @@
 #include "server.h"
-#define BUF_SIZE 256
+#define BUF_SIZE 4096
 
 /* Simple TCP Echo server */
 
@@ -45,7 +45,13 @@ int main(int argc, char* argv[]) {
             } else {
                 buf[nbytes] = '\0';
                 printf("[SERVER]: Received %s", buf);
-                if(send_all(clientfd, buf, nbytes) == -1) {
+
+                // prefixing string: "[RESPONSE]:"
+                char nb[BUF_SIZE];
+                int total_buf_size = snprintf(nb, sizeof(nb), "[RESPONSE]: %.*s\n", (int)nbytes, buf);
+
+                total_buf_size = (total_buf_size > BUF_SIZE) ? BUF_SIZE-1 : total_buf_size;
+                if(send_all(clientfd, nb, total_buf_size) == -1) {
                     break;
                 }
             }
