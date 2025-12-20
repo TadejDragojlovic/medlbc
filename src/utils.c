@@ -28,9 +28,27 @@ void logg(const char* format, ...) {
     va_end(args);
 }
 
+/* blocking send all function */
+ssize_t send_all_blocking(int fd, void* buf, size_t len) { 
+    ssize_t total = 0; 
+    while(len > 0) { 
+        ssize_t nbytes = send(fd, buf+total, len, 0); 
+        if(nbytes == -1) { 
+            perror("send_all"); 
+            if(errno == EINTR) continue; 
+            return -1; 
+        } 
+
+        total += nbytes; 
+        len -= nbytes; 
+    } 
+
+    return total; 
+}
+
 /* persistent read function for event-triggered reading;
    returns 0 if closed connection, -1 if error, otherwise total bytes read */
-ssize_t persistent_read(int fd, void* buf, size_t count) {
+ssize_t read_all(int fd, void* buf, size_t count) {
     ssize_t total = 0;
 
     for(;;) {
@@ -48,13 +66,47 @@ ssize_t persistent_read(int fd, void* buf, size_t count) {
             return 0;
         }
 
-        // read successfully
-        if(errno == EAGAIN || errno == EWOULDBLOCK) break;
+        if(nbytes == -1) {
+            // read successfully
+            if(errno == EAGAIN || errno == EWOULDBLOCK) break;
 
-        // otherwise error
-        perror("read");
-        return -1;
+            // interruption
+            if(errno == EINTR) continue;
+
+            // otherwise error
+            perror("read");
+            return -1;
+        }
     }
 
     return total;
+}
+
+/* function to send chunks of data based off of `sent` offset;
+   returns 0 if the data was partially sent, 1 if the transfer was succesful or -1 on error */
+int send_chunk(int fd, void* buf, size_t len, size_t *sent) {
+    if(len == 0) return 1;
+
+    while(*sent < len) {
+        ssize_t nbytes = send(fd, buf+(*sent), len-(*sent), 0);
+
+        if(nbytes>0) {
+            *sent += nbytes;
+            continue;
+        }
+
+        if(nbytes == -1) {
+            // interruption, continue
+            if(errno == EINTR) continue;
+
+            // don't block, wait for next EPOLLOUT
+            if(errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+
+            // error
+            return -1;
+        }
+    }
+
+    // everything sent successfully
+    return 1;
 }

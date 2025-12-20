@@ -67,22 +67,3 @@ int server_listen(int sockfd) {
 
     return 0;
 }
-
-/* Persistent `send` function */
-ssize_t send_all(int destfd, char* buf, ssize_t len) {
-    ssize_t sent, total_sent=0;
-
-    while(len > 0) {
-        if((sent = send(destfd, buf+total_sent, len, 0)) == -1) {
-            perror("sendall");
-
-            if(errno == EINTR) continue;
-            return -1;
-        }
-
-        total_sent += sent;
-        len -= sent;
-    }
-
-    return total_sent;
-}
