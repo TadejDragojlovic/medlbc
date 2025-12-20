@@ -1,21 +1,24 @@
 #include "connection.h"
 
-// TODO: improve this function to work with FDInfo
-void close_conn(WorkerProcess* worker, int conn_fd) {
-    close(conn_fd);
+/* Close desired socket, update number of connected clients accordingly */
+void close_client_conn(WorkerProcess* worker, int client_fd) {
+    close(client_fd);
     worker->num_conn--;
-    logg("Client %d [Worker: %d] hangup!", conn_fd, worker->pid);
+    logg("Client %d [Worker: %d] hangup!", client_fd, worker->pid);
 }
 
 /* Allocates memory for a new ConnectionContext and sets default values (including client_fd) */
-struct ConnectionContext* initialize_new_connection_context(int client_fd) {
+struct ConnectionContext* initialize_new_connection_context(struct FDInfo* fi) {
     struct ConnectionContext* ctx = malloc(sizeof(struct ConnectionContext));
     if(!ctx) return NULL;
     memset(ctx, 0, sizeof(*ctx));
 
-    ctx->clientfd = client_fd;
-    ctx->upstreamfd = -1;
+    ctx->client = fi;               // client fd info needs to be accessible from ctx
+    ctx->upstream = NULL;           // upstream fdinfo gets defined later on
     ctx->status = CTX_IDLE;
+
+    ctx->cli_sentoffset = 0;
+    ctx->up_sentoffset = 0;
 
     return ctx;
 }
@@ -58,14 +61,12 @@ int handle_new_conn(WorkerProcess* worker, int listenerfd) {
             continue;
         }
 
-        // connection context
-        struct ConnectionContext* ctx = initialize_new_connection_context(clientfd); // TODO: error handle
-
         // info about the file descriptor
-        struct FDInfo* fdinfo = initialize_new_fdinfo_structure(clientfd, FD_CLIENT, ctx); // TODO: error handle
+        struct FDInfo* fdinfo = initialize_new_fdinfo_structure(clientfd, FD_CLIENT, NULL); // TODO: error handle
 
-        // fdinfo needs to be accessible from ctx
-        ctx->client_info = fdinfo;
+        // connection context
+        struct ConnectionContext* ctx = initialize_new_connection_context(fdinfo); // TODO: error handle
+        fdinfo->ctx = ctx; // adding connection context to our client fdinfo structure
 
         struct epoll_event ev = {
             .events = EPOLLIN | EPOLLET | EPOLLRDHUP,
@@ -73,10 +74,9 @@ int handle_new_conn(WorkerProcess* worker, int listenerfd) {
         };
         if(epoll_ctl(worker->efd, EPOLL_CTL_ADD, clientfd, &ev) < 0) {
             perror("epoll_ctl");
-            // TODO: implement proper cleanup
             close(clientfd);
-            free(ctx);
             free(fdinfo);
+            free(ctx);
             continue;
         }
 
@@ -85,4 +85,41 @@ int handle_new_conn(WorkerProcess* worker, int listenerfd) {
     }
 
     return 0;
+}
+
+/* frees and cleans up everything related to the upstream (fd info, connection ctx, epoll) */
+void cleanup_upstream(WorkerProcess* worker, struct ConnectionContext* ctx) {
+    if(!ctx || !ctx->upstream) return;
+
+    // cleanup upstream
+    struct FDInfo* ufi = ctx->upstream;
+    epoll_ctl(worker->efd, EPOLL_CTL_DEL, ufi->fd, NULL);
+    close(ufi->fd);
+    free(ufi);
+
+    // reset upstream-related information in ctx
+    ctx->upstream       = NULL;
+    ctx->up_buflen      = 0;
+    ctx->up_sentoffset  = 0;
+    ctx->cli_sentoffset = 0;
+    memset(ctx->up_buf, 0, REQ_BUF_SIZE);
+
+    ctx->status = CTX_IDLE;
+}
+
+/* frees and cleans up everything related to the client (fd info, connection ctx, epoll) */
+void cleanup_client(WorkerProcess* worker, struct ConnectionContext* ctx) {
+    if(!ctx || !ctx->client) return;
+
+    // if upstream exists, make sure to cleanup that part first
+    cleanup_upstream(worker, ctx);
+
+    struct FDInfo* cfi = ctx->client;
+    epoll_ctl(worker->efd, EPOLL_CTL_DEL, cfi->fd, NULL);
+    close_client_conn(worker, cfi->fd);
+    free(cfi);
+    ctx->client = NULL;
+
+    free(ctx);
+    ctx = NULL;
 }

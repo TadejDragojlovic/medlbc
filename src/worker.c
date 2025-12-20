@@ -83,9 +83,6 @@ int setup_worker(int listenerfd, WorkerProcess* worker) {
 
 /* job loop for the worker process, handles events */
 void employ_worker(int listenerfd, WorkerProcess* worker) {
-    // TODO: find a better solution
-    int upstream_fds[100] = {0}, num_upstream_sockets = 0;
-
     for(;;) {
         logg("WORKER [%d] - current connections (%d)", worker->pid, worker->num_conn);
 
@@ -111,85 +108,181 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
 
             // hangup
             if(worker->event_buffers[j].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
-                int is_upstream = 0;
+                struct FDInfo* fi = worker->event_buffers[j].data.ptr;
 
-                // by upstream socket
-                for(int k=0;k<num_upstream_sockets;k++) {
-                    if(upstream_fds[k] == worker->event_buffers[j].data.fd) {
-                        logg("CONNECTING TO UPSTREAM FAILED.");
-                        is_upstream = 1;
-
-                        // TODO: implement proper cleanup
-                        epoll_ctl(worker->efd, EPOLL_CTL_DEL, worker->event_buffers[j].data.fd, NULL);
-                        close(worker->event_buffers[j].data.fd);
-                        // adjusting upstream socket list
-                        int found = 0;
-                        for(int k=0;k<num_upstream_sockets;k++) {
-                            if(upstream_fds[k] == worker->event_buffers[j].data.fd) {
-                                found=1;
-                                num_upstream_sockets--;
-                            }
-
-                            if(found) upstream_fds[k] = upstream_fds[k+1];
-                        }
-                        break;
-                    }
+                // client hangup
+                if(fi->type == FD_CLIENT) {
+                    // cleans and closes connection
+                    cleanup_client(worker, fi->ctx);
+                } else if(fi->type == FD_UPSTREAM) {
+                    // upstream hangup
+                    fi->ctx->status = CTX_ERROR;
+                    logg("[CTX_ERROR]: UPSTREAM NOT UP.");
+                    cleanup_upstream(worker, fi->ctx);
                 }
-
-                // by client
-                if(is_upstream == 0) close_conn(worker, worker->event_buffers[j].data.fd);
 
                 continue;
             }
 
-            // client sent data, forward request to backend to process it
+            // data ready to be read
             if(worker->event_buffers[j].events & EPOLLIN) {
-                int upstream_sockfd;
-                if((upstream_sockfd = connect_to_upstream(upstream_servers[0])) == -1) {
-                    logg("ERROR IN TRYING TO ESTABLISH A CONNECTION TO BACKEND.");
-                    continue;
-                }
+                struct FDInfo* fi = worker->event_buffers[j].data.ptr;
 
-                // nonblocking socket for upstream
-                struct epoll_event ev = {
-                    .events = EPOLLOUT | EPOLLIN | EPOLLET,
-                    .data.fd = upstream_sockfd
-                };
-                epoll_ctl(worker->efd, EPOLL_CTL_ADD, upstream_sockfd, &ev);
+                // client has data ready to be read
+                if(fi->type == FD_CLIENT) {
 
-                upstream_fds[num_upstream_sockets++] = upstream_sockfd;
-            }
+                    // so far client has been idle
+                    if(fi->ctx->status == CTX_IDLE) {
+                        // persistent read for epollet
+                        ssize_t total = read_all(fi->fd, fi->ctx->cli_buf, REQ_BUF_SIZE);
 
-            // EPOLLOUT on upstream sockets
-            if(worker->event_buffers[j].events & EPOLLOUT) {
-                int err;
-                socklen_t len = sizeof(err);
+                        if(total == 0) { // connection closed by client
+                            fi->ctx->status = CTX_ERROR;
+                            logg("[CTX_ERROR]: client closed connection.");
+                            cleanup_client(worker, fi->ctx);
+                            continue;
+                        } else if(total < 0) { // error during read
+                            fi->ctx->status = CTX_ERROR;
+                            logg("[CTX_ERROR]: encountered error while reading client request, closing connection.");
+                            cleanup_client(worker, fi->ctx);
+                            continue;
+                        }
 
-                getsockopt(worker->event_buffers[j].data.fd, SOL_SOCKET, SO_ERROR, &err, &len);
+                        // otherwise, read successfully
+                        fi->ctx->cli_buflen = total;
 
-                // Connection succesfull
-                if(err == 0) {
-                    // TODO
-                    logg("TODO HANDLE CLIENT REQUEST");
-                } else {
-                    logg("ERROR CONNECTING TO THE UPSTREAM SERVER");
-                }
-
-                // TODO: implement proper cleanup
-                epoll_ctl(worker->efd, EPOLL_CTL_DEL, worker->event_buffers[j].data.fd, NULL);
-                close(worker->event_buffers[j].data.fd);
-                // adjusting upstream socket list
-                int found = 0;
-                for(int k=0;k<num_upstream_sockets;k++) {
-                    if(upstream_fds[k] == worker->event_buffers[j].data.fd) {
-                        found=1;
-                        num_upstream_sockets--;
+                        fi->ctx->status = CTX_CONNECTING_TO_UPSTREAM;
                     }
 
-                    if(found) upstream_fds[k] = upstream_fds[k+1];
-                }
+                    // fallthrough from CTX_IDLE
+                    if(fi->ctx->status == CTX_CONNECTING_TO_UPSTREAM) {
+                        // connecting to upstream
+                        int upstream_sockfd;
+                        if((upstream_sockfd = connect_to_upstream(upstream_servers[0])) == -1) {
+                            fi->ctx->status = CTX_ERROR;
 
-                continue;
+                            // soft reset of the ctx, upstream not defined yet so doesn't need cleaning up
+                            logg("[CTX_ERROR]: error in trying to establish a connection to upstream.");
+                            fi->ctx->upstream = NULL;
+                            fi->ctx->status = CTX_IDLE;
+                            continue;
+                        }
+
+                        logg("1. trying to connect to upstream");
+
+                        // registering FDInfo for upstream
+                        struct FDInfo* ufi = initialize_new_fdinfo_structure(upstream_sockfd, FD_UPSTREAM, fi->ctx); // TODO: error handle
+
+                        fi->ctx->upstream = ufi;
+
+                        // nonblocking socket for upstream
+                        struct epoll_event ev = {
+                            .events = EPOLLOUT | EPOLLET,
+                            .data.ptr = ufi,
+                        };
+                        epoll_ctl(worker->efd, EPOLL_CTL_ADD, upstream_sockfd, &ev);
+                        continue;
+                    }
+                } else if(fi->type == FD_UPSTREAM) {
+
+                    // returning the response to client
+                    if(fi->ctx->status == CTX_WAITING_RESPONSE) {
+                        // upstream response
+                        ssize_t total = read_all(fi->fd, fi->ctx->up_buf, REQ_BUF_SIZE);
+
+                        if(total == 0) { // connection closed
+                            fi->ctx->status = CTX_ERROR;
+                            logg("[CTX_ERROR]: upstream closed the connection.");
+                            cleanup_upstream(worker, fi->ctx);
+                            continue;
+                        } else if(total < 0) { // error during read
+                            fi->ctx->status = CTX_ERROR;
+                            logg("[CTX_ERROR]: upstream failed to read the request.");
+                            cleanup_upstream(worker, fi->ctx);
+                            continue;
+                        }
+
+                        // otherwise, read successfully
+                        fi->ctx->up_buflen = total;
+
+                        logg("4. read response.");
+
+                        // writing back to client
+                        int rv = send_chunk(fi->ctx->client->fd, fi->ctx->up_buf, fi->ctx->up_buflen, &(fi->ctx->up_sentoffset));
+
+                        // request succesfully sent
+                        if(rv == 1) {
+                            logg("5. response successfully sent to client.");
+                            fi->ctx->status = CTX_SUCCESS;
+                        } else if(rv == -1) {
+                            // error while sending data
+                            fi->ctx->status = CTX_ERROR;
+                            logg("[CTX_ERROR]: upstream failed to send the resposne back.");
+                        }
+
+                        cleanup_upstream(worker, fi->ctx);
+                        continue;
+                    }
+                }
+            }
+
+            // EPOLLOUT
+            /* Epollout signals when TCP handshake is over, so the socket is ready to be written to */
+            /* When epollout signals, we check errno to see if `connect` succeeded */
+            if(worker->event_buffers[j].events & EPOLLOUT) {
+                struct FDInfo* fi = worker->event_buffers[j].data.ptr;
+
+                // upstream receives data
+                if (fi->type == FD_UPSTREAM) {
+                    // handle initial connection
+                    if(fi->ctx->status == CTX_CONNECTING_TO_UPSTREAM) {
+                        int err;
+                        socklen_t len = sizeof(err);
+
+                        getsockopt(fi->fd, SOL_SOCKET, SO_ERROR, &err, &len);
+
+                        // connection failed
+                        if(err != 0) {
+                            fi->ctx->status = CTX_ERROR;
+                            logg("[CTX_ERROR]: UPSTREAM UP, BUT DENIED CONNECTION.");
+                            cleanup_upstream(worker, fi->ctx);
+                            continue;
+                        }
+
+                        logg("2. connection to upstream good");
+                        // connection successful
+                        if(err == 0) {
+                            fi->ctx->status = CTX_FORWARDING_REQUEST;
+                        }
+
+                        // fallthrough
+                    }
+
+                    // sending request from client to upstream
+                    if(fi->ctx->status == CTX_FORWARDING_REQUEST) {
+                        int rv = send_chunk(fi->ctx->upstream->fd, fi->ctx->cli_buf, fi->ctx->cli_buflen, &(fi->ctx->cli_sentoffset));
+
+                        // request succesfully sent
+                        if(rv == 1) {
+                            logg("3. data successfully sent to upstream.");
+                            fi->ctx->status = CTX_WAITING_RESPONSE;
+
+                            // upstream doesn't need EPOLLOUT anymore, now only EPOLLIN
+                            struct epoll_event ev = {
+                                .events = EPOLLIN | EPOLLET,
+                                .data.ptr = fi->ctx->upstream,
+                            };
+                            epoll_ctl(worker->efd, EPOLL_CTL_MOD, fi->fd, &ev);
+                        } else if(rv == -1) {
+                            // error while sending data
+                            fi->ctx->status = CTX_ERROR;
+                            logg("[CTX_ERROR]: sending request to upstream failed.");
+                            cleanup_upstream(worker, fi->ctx);
+                        }
+
+                        continue;
+                    }
+                }
             }
         }
     }

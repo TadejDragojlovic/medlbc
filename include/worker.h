@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
@@ -11,7 +12,7 @@
 #include "utils.h"
 #include "upstream.h"
 
-#define MAXEVENTS 64 // max numbers of fds for the epoll buffer
+#define MAXEVENTS 1024 // max numbers of fds for the epoll buffer
 
 typedef struct {
     pid_t pid;                                      // process id
