@@ -1,5 +1,65 @@
 #include "connection.h"
 
+/* Returns status name as string from enum CTXStatus */
+const char* get_status_name(enum CTXStatus status) {
+    switch(status) {
+        case CTX_IDLE:
+            return "CTX_IDLE";
+        case CTX_CONNECTING_TO_UPSTREAM:
+            return "CTX_CONNECTING_TO_UPSTREAM";
+        case CTX_FORWARDING_REQUEST:
+            return "CTX_FORWARDING_REQUEST";
+        case CTX_WAITING_RESPONSE:
+            return "CTX_WAITING_RESPONSE";
+        case CTX_SUCCESS:
+            return "CTX_SUCCESS";
+        case CTX_ERROR:
+            return "CTX_ERROR";
+        default:
+            return "";
+    }
+}
+
+/* Add a new ConnectionContext node to linked list */
+struct ConnectionNode* add_ctx_node(WorkerProcess* worker, struct ConnectionContext* ctx) {
+    struct ConnectionNode* new_node = malloc(sizeof(*new_node));
+    if(!new_node) return NULL;
+
+    new_node->ctx = ctx;
+    new_node->prev = NULL;
+    new_node->next = worker->conn_head;
+
+    if(worker->conn_head) worker->conn_head->prev = new_node;
+    worker->conn_head = new_node;
+
+    ctx->node = new_node;
+    return new_node;
+}
+
+/* Delete a ConncetionContext node from a linked list */
+void delete_ctx_node(WorkerProcess* worker, struct ConnectionNode* node) {
+    if(node->prev) node->prev->next = node->next;
+    else worker->conn_head = node->next;
+
+    if(node->next) node->next->prev = node->prev;
+
+    free(node);
+    node=NULL;
+}
+
+/* Iterating through the linked list and printing */
+void print_ctx_list(WorkerProcess* worker) {
+    struct ConnectionNode* tmp = worker->conn_head;
+
+    while(tmp!=NULL) {
+        printf("clientfd: %d\nupstreamfd: %d\nconnection status: %s\n",
+                tmp->ctx->client->fd,
+                tmp->ctx->upstream == NULL ? -1 : tmp->ctx->upstream->fd,
+                get_status_name(tmp->ctx->status));
+        tmp = tmp->next;
+    }
+}
+
 /* Close desired socket, update number of connected clients accordingly */
 void close_client_conn(WorkerProcess* worker, int client_fd) {
     close(client_fd);
@@ -80,6 +140,9 @@ int handle_new_conn(WorkerProcess* worker, int listenerfd) {
             continue;
         }
 
+        // Adding the ctx node to the workers list
+        if(add_ctx_node(worker, ctx) == NULL) cleanup_client(worker, ctx);
+
         logg("New connection accepted!");
         worker->num_conn++;
     }
@@ -113,6 +176,11 @@ void cleanup_client(WorkerProcess* worker, struct ConnectionContext* ctx) {
 
     // if upstream exists, make sure to cleanup that part first
     cleanup_upstream(worker, ctx);
+
+    // deleting the node from linked list
+    if(ctx->node) {
+        delete_ctx_node(worker, ctx->node);
+    }
 
     struct FDInfo* cfi = ctx->client;
     epoll_ctl(worker->efd, EPOLL_CTL_DEL, cfi->fd, NULL);

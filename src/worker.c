@@ -34,15 +34,18 @@ WorkerProcess spawn_worker(int listenerfd, int index) {
             close(pipefd[1]);
             close(listenerfd);
             exit(EXIT_FAILURE);
+        } else {
+            // success
+            write(pipefd[1], "0", 1);
+            close(pipefd[1]);
+
+            // workers lifecycle
+            employ_worker(listenerfd, &new_worker);
+            cleanup_worker(listenerfd, &new_worker);
+
+            // TODO: implement exit codes (to indicate failures)
+            exit(0);
         }
-
-        // success
-        write(pipefd[1], "0", 1);
-        close(pipefd[1]);
-
-        employ_worker(listenerfd, &new_worker);
-        cleanup_worker(listenerfd, &new_worker);
-        exit(0);
     }
 
     char status;
@@ -78,6 +81,8 @@ int setup_worker(int listenerfd, WorkerProcess* worker) {
         return -1;
     }
 
+    worker->conn_head = NULL;
+
     return 0;
 }
 
@@ -95,8 +100,7 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
             }
 
             perror("epoll_wait");
-            cleanup_worker(listenerfd, worker);
-            exit(EXIT_FAILURE);
+            break;
         }
 
         for(int j=0;j<ready;j++) {
@@ -351,14 +355,19 @@ void manage_workers(WorkerProcess* worker_array, int n, int listenerfd) {
     logg("NO WORKERS ALIVE. TERMINATING...");
 }
 
-/* Cleans up epoll structure, closes all sockets */
+/* Cleans up the worker process:
+   - frees the linked list connection contexes for through cleanup_client for each client
+   - closes all used sockets */
 void cleanup_worker(int listenerfd, WorkerProcess* worker) {
-    for(int i=0;i<worker->num_conn;i++) {
-        int cfd = worker->event_buffers[i].data.fd;
-        epoll_ctl(worker->efd, EPOLL_CTL_DEL, cfd, NULL);
-        close(cfd);
+    struct ConnectionNode* curr_node = worker->conn_head;
+    
+    while(curr_node) {
+        struct ConnectionNode* next = curr_node->next;
+        cleanup_client(worker, curr_node->ctx);
+        curr_node = next;
     }
 
+    logg("Closing epoll fd = %d", worker->efd);
     close(worker->efd);
     close(listenerfd); // closes child copy of listenerfd
 }

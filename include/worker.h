@@ -17,11 +17,14 @@
 typedef struct {
     pid_t pid;                                      // process id
     int idx;                                        // worker index
-    int num_conn;                                   // current number of connections
 
     /* Epoll attributes */
     int efd;                                        // epoll file descriptor
     struct epoll_event event_buffers[MAXEVENTS];    // event buffer for sockets
+
+    /* Connection attributes */
+    int num_conn;                                   // current number of CLIENT connections (doesn't count upstream connections)
+    struct ConnectionNode* conn_head;               // head of a doubly-linked list full of ConnectionContext structures (for each connection)
 } WorkerProcess;
 
 WorkerProcess spawn_worker(int listenerfd, int index);
