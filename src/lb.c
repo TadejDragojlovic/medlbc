@@ -29,14 +29,10 @@ int main(int argc, char* argv[]) {
 
 
 /* TODO: STA RADITI SAD
-1. struktura za kontekst zahteva klijenta (ClientRequestContext / ConnectionContext)
-2. refaktorisanje dela za konekciju sa upstream serverom
-    2.1 vise upstream servera istovremeno
-    2.2 algoritam za biranje upstream servera za konekciju sa klijentom (round robin load balancing)
-3. client.c ?
+1. algoritam za biranje upstream servera za konekciju sa klijentom (round robin load balancing)
+2. client.c ?
 
 VECI KORACI: 
-- implementacija algoritma za load balancing
 - health check mehanizam
 
 BONUS:
