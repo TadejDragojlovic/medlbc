@@ -2,7 +2,7 @@
 #include "worker.h"
 #include "server.h"
 
-#define N_WORKERS 1
+#define N_WORKERS 3
 #define PORT "3456"
 
 int main(int argc, char* argv[]) {

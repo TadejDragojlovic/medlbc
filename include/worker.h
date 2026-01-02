@@ -27,6 +27,8 @@ typedef struct {
     struct ConnectionNode* conn_head;               // head of a doubly-linked list full of ConnectionContext structures (for each connection)
 } WorkerProcess;
 
+void signal_handler(int signum);
+
 WorkerProcess spawn_worker(int listenerfd, int index);
 int setup_worker(int listenerfd, WorkerProcess* worker);
 void employ_worker(int listenerfd, WorkerProcess* worker);

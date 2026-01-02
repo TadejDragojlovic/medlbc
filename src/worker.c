@@ -7,6 +7,14 @@ static struct UpstreamServer upstream_servers[2] = {
     { "127.0.0.1", 4446}
 };
 
+// graceful shutdown flag
+static volatile sig_atomic_t start_shutdown = 0;
+
+/* Signal handler function */
+void signal_handler(int signum) {
+    if(signum == SIGINT || signum == SIGTERM) start_shutdown=1;
+}
+
 /* Returns WorkerProcess that is already setup if everything goes well,
 otherwise it returns WorkerProcess that has "pid" attribute set to -1, error;
 utilizing pipe to obtain communication between children and parent */
@@ -24,8 +32,15 @@ WorkerProcess spawn_worker(int listenerfd, int index) {
 
     pid_t wpid = fork();
 
+    /* both processes need to know this info:
+        1. master for the worker array (needs to know it's child pid for waitpid later on)
+        2. worker needs to know it's pid, for logging purposes mainly
+    */
+    new_worker.pid = wpid;
+
+    // child process
     if(wpid==0) {
-        new_worker.pid = getpid();
+        new_worker.pid = getpid(); // worker needs to know its pid
         close(pipefd[0]);
 
         // setup failed, writes '1' to pipe to inform parent about error
@@ -39,15 +54,30 @@ WorkerProcess spawn_worker(int listenerfd, int index) {
             write(pipefd[1], "0", 1);
             close(pipefd[1]);
 
+            // signal handling for the worker process
+            struct sigaction sa = {0};
+            sa.sa_flags = SA_RESTART;
+            sa.sa_handler = signal_handler;
+            sigemptyset(&sa.sa_mask);
+
+            if(sigaction(SIGINT, &sa, NULL) == -1) {
+                perror("sigaction SIGINT");
+                exit(EXIT_FAILURE);
+            }
+            if(sigaction(SIGTERM, &sa, NULL) == -1) {
+                perror("sigaction SIGTERM");
+                exit(EXIT_FAILURE);
+            }
+
             // workers lifecycle
             employ_worker(listenerfd, &new_worker);
             cleanup_worker(listenerfd, &new_worker);
 
-            // TODO: implement exit codes (to indicate failures)
-            exit(0);
+            exit(1);
         }
     }
 
+    // parent process
     char status;
     if(read(pipefd[0], &status, 1) != 1 || status != '0')
         new_worker.pid = -1;
@@ -88,14 +118,28 @@ int setup_worker(int listenerfd, WorkerProcess* worker) {
 
 /* job loop for the worker process, handles events */
 void employ_worker(int listenerfd, WorkerProcess* worker) {
-    for(;;) {
-        logg("WORKER [%d] - current connections (%d)", worker->pid, worker->num_conn);
+    // when '0', listener is deleted from the epoll set, meaning the worker entered "shutdown mode",
+    // it is now waiting for the rest of conns to finish up, before exiting
+    int listener_active = 1;
 
-        const int ready = epoll_wait(worker->efd, worker->event_buffers, MAXEVENTS, -1);
+    // timeout for the epoll_wait function, initially -1, could be longer if in "shutdown mode"
+    int ewait_timeout = -1;
+
+    for(;;) {
+        // signal to start "shutdown mode" and exit gracefully
+        if(start_shutdown && listener_active) {
+            epoll_ctl(worker->efd, EPOLL_CTL_DEL, listenerfd, NULL);
+            close(listenerfd);
+            listener_active = 0;
+            ewait_timeout = 200;
+        }
+
+        if(!start_shutdown) logg("WORKER [%d] - current connections (%d)", worker->pid, worker->num_conn);
+
+        const int ready = epoll_wait(worker->efd, worker->event_buffers, MAXEVENTS, ewait_timeout);
 
         if(ready < 0) {
             if(errno == EINTR) {
-                // got interrupted by some signal, continue
                 continue;
             }
 
@@ -289,6 +333,11 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
                 }
             }
         }
+
+        // all connections respected, safe shutdown
+        if(start_shutdown && worker->num_conn == 0) {
+            break;
+        }
     }
 }
 
@@ -323,31 +372,82 @@ void manage_workers(WorkerProcess* worker_array, int n, int listenerfd) {
     int status, worker_count = n;
     pid_t p;
 
+    // TODO: hardcoded, should be configurable in the config
+    int respawn_attempts = 3;
+
     while(worker_count > 0) {
         // reaping all children
         while((p = waitpid(-1, &status, WNOHANG)) > 0) {
             for(int i=0;i<n;i++) {
                 if(worker_array[i].pid == p) {
                     worker_count--;
-                    logg("[WORKER (idx = %d) PROCESS (pid= %d)] TERMINATED. SPAWNING A NEW WORKER...", i, p);
 
-                    // worker respawn
-                    WorkerProcess new_worker = spawn_worker(listenerfd, i);
-                    if(new_worker.pid == -1) {
-                        fprintf(stderr, "Error occured while spawning worker %d\n", i);
-                        break;
+                    // parsing status
+                    if(WIFEXITED(status)) {
+                        int exit_code = WEXITSTATUS(status);
+
+                        if(exit_code == 0) {
+                            // no respawn, send SIGTERM to others
+                            logg("[WORKER (idx = %d, pid = %d) exited normally (0), graceful exit.", i, p);
+
+                            for(int j=0;j<n;j++) {
+                                if(worker_array[j].pid != p) kill(worker_array[j].pid, SIGTERM);
+                            }
+                        } else {
+                            logg("[WORKER (idx = %d, pid = %d) exited with code %d, respawning...", i, p, exit_code);
+
+                            logg("RESPAWNING WORKER...");
+                            for(int t=0;t<respawn_attempts;t++) {
+                                WorkerProcess new_worker = spawn_worker(listenerfd, i);
+
+                                // success
+                                if(new_worker.pid != -1) {
+                                    worker_array[i] = new_worker;
+                                    worker_count++;
+                                    break;
+                                }
+                            }
+                        }
+                    } else if(WIFSIGNALED(status)) {
+                        int sig = WTERMSIG(status);
+
+                        logg("[WORKER (idx = %d, pid = %d) killed by signal %d, respawning...", i, p, sig);
+
+                        logg("RESPAWNING WORKER...");
+                        for(int t=0;t<respawn_attempts;t++) {
+                            WorkerProcess new_worker = spawn_worker(listenerfd, i);
+
+                            // success
+                            if(new_worker.pid != -1) {
+                                worker_array[i] = new_worker;
+                                worker_count++;
+                                break;
+                            }
+                        }
+                    } else {
+                        logg("[WORKER (idx = %d, pid = %d) exited abnormally, respawning...", i, p);
+
+                        logg("RESPAWNING WORKER...");
+                        for(int t=0;t<respawn_attempts;t++) {
+                            WorkerProcess new_worker = spawn_worker(listenerfd, i);
+
+                            // success
+                            if(new_worker.pid != -1) {
+                                worker_array[i] = new_worker;
+                                worker_count++;
+                                break;
+                            }
+                        }
                     }
-
-                    // respawn successful
-                    worker_array[i] = new_worker;
-                    worker_count++;
 
                     break;
                 }
             }
         }
 
-        if(p == -1 && errno == ECHILD) break;
+        if(p == -1 && errno == ECHILD) { 
+            break;
+        }
 
         sleep(1);
     }
@@ -367,7 +467,7 @@ void cleanup_worker(int listenerfd, WorkerProcess* worker) {
         curr_node = next;
     }
 
-    logg("Closing epoll fd = %d", worker->efd);
+    // logg("Closing epoll fd = %d", worker->efd);
     close(worker->efd);
     close(listenerfd); // closes child copy of listenerfd
 }
