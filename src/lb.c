@@ -2,7 +2,7 @@
 #include "worker.h"
 #include "server.h"
 
-#define N_WORKERS 3
+#define N_WORKERS 1
 #define PORT "3456"
 
 int main(int argc, char* argv[]) {
@@ -10,6 +10,12 @@ int main(int argc, char* argv[]) {
 
     if((listenerfd = create_server_socket(PORT, 1)) == -1) exit(1);
     if(server_listen(listenerfd) == -1) exit(1);
+
+    // signal handling for master process
+    if(setup_sigaction(SIGINT, master_sighandler, SA_RESTART) == -1 ||
+       setup_sigaction(SIGTERM, master_sighandler, SA_RESTART) == -1) {
+        exit(EXIT_FAILURE);
+    }
 
     // 1. Master process starts up N_WORKERS
     WorkerProcess* worker_array = init_workers(listenerfd, N_WORKERS);

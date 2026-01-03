@@ -7,12 +7,26 @@ static struct UpstreamServer upstream_servers[2] = {
     { "127.0.0.1", 4446}
 };
 
-// graceful shutdown flag
-static volatile sig_atomic_t start_shutdown = 0;
+// master shutdown flag
+static volatile sig_atomic_t master_shutdown = 0;
 
-/* Signal handler function */
-void signal_handler(int signum) {
-    if(signum == SIGINT || signum == SIGTERM) start_shutdown=1;
+// graceful shutdown flag for worker
+static volatile sig_atomic_t start_shutdown = 0;
+static int shutdown_fd_global = -1;
+
+/* Signal handler function for master process */
+void master_sighandler(int signum) {
+    master_shutdown = 1;
+}
+
+/* Signal handler function, writes to shutdown_fd */
+void worker_sighandler(int signum) {
+    start_shutdown = 1;
+
+    if(shutdown_fd_global > 0) {
+        uint64_t b = 1;
+        write(shutdown_fd_global, &b, sizeof(b));
+    }
 }
 
 /* Returns WorkerProcess that is already setup if everything goes well,
@@ -54,18 +68,12 @@ WorkerProcess spawn_worker(int listenerfd, int index) {
             write(pipefd[1], "0", 1);
             close(pipefd[1]);
 
-            // signal handling for the worker process
-            struct sigaction sa = {0};
-            sa.sa_flags = SA_RESTART;
-            sa.sa_handler = signal_handler;
-            sigemptyset(&sa.sa_mask);
+            // making shutdown fd global
+            shutdown_fd_global = new_worker.shutdown_fd;
 
-            if(sigaction(SIGINT, &sa, NULL) == -1) {
-                perror("sigaction SIGINT");
-                exit(EXIT_FAILURE);
-            }
-            if(sigaction(SIGTERM, &sa, NULL) == -1) {
-                perror("sigaction SIGTERM");
+            // signal handling for the worker process
+            if(setup_sigaction(SIGINT, worker_sighandler, SA_RESTART) == -1 ||
+               setup_sigaction(SIGTERM, worker_sighandler, SA_RESTART) == -1) {
                 exit(EXIT_FAILURE);
             }
 
@@ -73,7 +81,7 @@ WorkerProcess spawn_worker(int listenerfd, int index) {
             employ_worker(listenerfd, &new_worker);
             cleanup_worker(listenerfd, &new_worker);
 
-            exit(1);
+            exit(0);
         }
     }
 
@@ -88,7 +96,7 @@ WorkerProcess spawn_worker(int listenerfd, int index) {
     return new_worker;
 }
 
-/* sets up epoll array for the worker, returns -1 on fail */
+/* sets up epoll array for the worker; returns -1 on fail */
 int setup_worker(int listenerfd, WorkerProcess* worker) {
     int efd = epoll_create1(0);
 
@@ -100,18 +108,41 @@ int setup_worker(int listenerfd, WorkerProcess* worker) {
 
     worker->efd = efd;
     worker->num_conn = 0;
+    worker->conn_head = NULL;
 
-    struct epoll_event event;
+    // listenerfd
+    struct FDInfo *lfi = malloc(sizeof(*lfi));
+    lfi->fd = listenerfd;
+    lfi->type = FD_LISTENER;
+    lfi->ctx = NULL;
 
-    event.data.fd = listenerfd;
-    event.events = EPOLLIN | EPOLLET;
-    if(epoll_ctl(worker->efd, EPOLL_CTL_ADD, listenerfd, &event) == -1) {
+    struct epoll_event lev = { .events = EPOLLIN, .data.ptr = lfi };
+    if(epoll_ctl(worker->efd, EPOLL_CTL_ADD, listenerfd, &lev) == -1) {
         perror("epoll_ctl");
         close(worker->efd);
         return -1;
     }
 
-    worker->conn_head = NULL;
+    // shutdown_fd used for signaling shutdown by master process
+    worker->shutdown_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if(worker->shutdown_fd == -1) {
+        perror("eventfd");
+        close(worker->efd);
+        return -1;
+    }
+
+    struct FDInfo *sfi = malloc(sizeof(*sfi));
+    sfi->fd = worker->shutdown_fd;
+    sfi->type = FD_SHUTDOWN;
+    sfi->ctx = NULL;
+
+    struct epoll_event sev = { .events = EPOLLIN, .data.ptr = sfi };
+    if(epoll_ctl(worker->efd, EPOLL_CTL_ADD, worker->shutdown_fd, &sev) == -1) {
+        perror("epoll_ctl");
+        close(worker->shutdown_fd);
+        close(worker->efd);
+        return -1;
+    }
 
     return 0;
 }
@@ -126,14 +157,6 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
     int ewait_timeout = -1;
 
     for(;;) {
-        // signal to start "shutdown mode" and exit gracefully
-        if(start_shutdown && listener_active) {
-            epoll_ctl(worker->efd, EPOLL_CTL_DEL, listenerfd, NULL);
-            close(listenerfd);
-            listener_active = 0;
-            ewait_timeout = 200;
-        }
-
         if(!start_shutdown) logg("WORKER [%d] - current connections (%d)", worker->pid, worker->num_conn);
 
         const int ready = epoll_wait(worker->efd, worker->event_buffers, MAXEVENTS, ewait_timeout);
@@ -148,25 +171,41 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
         }
 
         for(int j=0;j<ready;j++) {
+            struct FDInfo *curr_fi = worker->event_buffers[j].data.ptr;
+
+            // signal on shutdown_fd for graceful exit
+            if(curr_fi->type == FD_SHUTDOWN) {
+                uint64_t b;
+                read(worker->shutdown_fd, &b, sizeof(b));
+
+                logg("[Worker]: Shutdown signal received.");
+                if(listener_active) {
+                    epoll_ctl(worker->efd, EPOLL_CTL_DEL, listenerfd, NULL);
+                    // close(listenerfd);
+                    listener_active = 0;
+                    ewait_timeout = 200;
+                }
+                continue;
+            }
+
             // new connection
-            if(worker->event_buffers[j].data.fd == listenerfd) {
+            if(curr_fi->type == FD_LISTENER) {
+                logg("CURR: LISTENER");
                 handle_new_conn(worker, listenerfd);
                 continue;
             }
 
             // hangup
             if(worker->event_buffers[j].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
-                struct FDInfo* fi = worker->event_buffers[j].data.ptr;
-
                 // client hangup
-                if(fi->type == FD_CLIENT) {
+                if(curr_fi->type == FD_CLIENT) {
                     // cleans and closes connection
-                    cleanup_client(worker, fi->ctx);
-                } else if(fi->type == FD_UPSTREAM) {
+                    cleanup_client(worker, curr_fi->ctx);
+                } else if(curr_fi->type == FD_UPSTREAM) {
                     // upstream hangup
-                    fi->ctx->status = CTX_ERROR;
+                    curr_fi->ctx->status = CTX_ERROR;
                     logg("[CTX_ERROR]: UPSTREAM NOT UP.");
-                    cleanup_upstream(worker, fi->ctx);
+                    cleanup_upstream(worker, curr_fi->ctx);
                 }
 
                 continue;
@@ -174,54 +213,52 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
 
             // data ready to be read
             if(worker->event_buffers[j].events & EPOLLIN) {
-                struct FDInfo* fi = worker->event_buffers[j].data.ptr;
-
                 // client has data ready to be read
-                if(fi->type == FD_CLIENT) {
+                if(curr_fi->type == FD_CLIENT) {
 
                     // so far client has been idle
-                    if(fi->ctx->status == CTX_IDLE) {
+                    if(curr_fi->ctx->status == CTX_IDLE) {
                         // persistent read for epollet
-                        ssize_t total = read_all(fi->fd, fi->ctx->cli_buf, REQ_BUF_SIZE);
+                        ssize_t total = read_all(curr_fi->fd, curr_fi->ctx->cli_buf, REQ_BUF_SIZE);
 
                         if(total == 0) { // connection closed by client
-                            fi->ctx->status = CTX_ERROR;
+                            curr_fi->ctx->status = CTX_ERROR;
                             logg("[CTX_ERROR]: client closed connection.");
-                            cleanup_client(worker, fi->ctx);
+                            cleanup_client(worker, curr_fi->ctx);
                             continue;
                         } else if(total < 0) { // error during read
-                            fi->ctx->status = CTX_ERROR;
+                            curr_fi->ctx->status = CTX_ERROR;
                             logg("[CTX_ERROR]: encountered error while reading client request, closing connection.");
-                            cleanup_client(worker, fi->ctx);
+                            cleanup_client(worker, curr_fi->ctx);
                             continue;
                         }
 
                         // otherwise, read successfully
-                        fi->ctx->cli_buflen = total;
+                        curr_fi->ctx->cli_buflen = total;
 
-                        fi->ctx->status = CTX_CONNECTING_TO_UPSTREAM;
+                        curr_fi->ctx->status = CTX_CONNECTING_TO_UPSTREAM;
                     }
 
                     // fallthrough from CTX_IDLE
-                    if(fi->ctx->status == CTX_CONNECTING_TO_UPSTREAM) {
+                    if(curr_fi->ctx->status == CTX_CONNECTING_TO_UPSTREAM) {
                         // connecting to upstream
                         int upstream_sockfd;
                         if((upstream_sockfd = connect_to_upstream(upstream_servers[0])) == -1) {
-                            fi->ctx->status = CTX_ERROR;
+                            curr_fi->ctx->status = CTX_ERROR;
 
                             // soft reset of the ctx, upstream not defined yet so doesn't need cleaning up
                             logg("[CTX_ERROR]: error in trying to establish a connection to upstream.");
-                            fi->ctx->upstream = NULL;
-                            fi->ctx->status = CTX_IDLE;
+                            curr_fi->ctx->upstream = NULL;
+                            curr_fi->ctx->status = CTX_IDLE;
                             continue;
                         }
 
                         logg("1. trying to connect to upstream");
 
                         // registering FDInfo for upstream
-                        struct FDInfo* ufi = initialize_new_fdinfo_structure(upstream_sockfd, FD_UPSTREAM, fi->ctx); // TODO: error handle
+                        struct FDInfo* ufi = initialize_new_fdinfo_structure(upstream_sockfd, FD_UPSTREAM, curr_fi->ctx); // TODO: error handle
 
-                        fi->ctx->upstream = ufi;
+                        curr_fi->ctx->upstream = ufi;
 
                         // nonblocking socket for upstream
                         struct epoll_event ev = {
@@ -231,44 +268,44 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
                         epoll_ctl(worker->efd, EPOLL_CTL_ADD, upstream_sockfd, &ev);
                         continue;
                     }
-                } else if(fi->type == FD_UPSTREAM) {
+                } else if(curr_fi->type == FD_UPSTREAM) {
 
                     // returning the response to client
-                    if(fi->ctx->status == CTX_WAITING_RESPONSE) {
+                    if(curr_fi->ctx->status == CTX_WAITING_RESPONSE) {
                         // upstream response
-                        ssize_t total = read_all(fi->fd, fi->ctx->up_buf, REQ_BUF_SIZE);
+                        ssize_t total = read_all(curr_fi->fd, curr_fi->ctx->up_buf, REQ_BUF_SIZE);
 
                         if(total == 0) { // connection closed
-                            fi->ctx->status = CTX_ERROR;
+                            curr_fi->ctx->status = CTX_ERROR;
                             logg("[CTX_ERROR]: upstream closed the connection.");
-                            cleanup_upstream(worker, fi->ctx);
+                            cleanup_upstream(worker, curr_fi->ctx);
                             continue;
                         } else if(total < 0) { // error during read
-                            fi->ctx->status = CTX_ERROR;
+                            curr_fi->ctx->status = CTX_ERROR;
                             logg("[CTX_ERROR]: upstream failed to read the request.");
-                            cleanup_upstream(worker, fi->ctx);
+                            cleanup_upstream(worker, curr_fi->ctx);
                             continue;
                         }
 
                         // otherwise, read successfully
-                        fi->ctx->up_buflen = total;
+                        curr_fi->ctx->up_buflen = total;
 
                         logg("4. read response.");
 
                         // writing back to client
-                        int rv = send_chunk(fi->ctx->client->fd, fi->ctx->up_buf, fi->ctx->up_buflen, &(fi->ctx->up_sentoffset));
+                        int rv = send_chunk(curr_fi->ctx->client->fd, curr_fi->ctx->up_buf, curr_fi->ctx->up_buflen, &(curr_fi->ctx->up_sentoffset));
 
                         // request succesfully sent
                         if(rv == 1) {
                             logg("5. response successfully sent to client.");
-                            fi->ctx->status = CTX_SUCCESS;
+                            curr_fi->ctx->status = CTX_SUCCESS;
                         } else if(rv == -1) {
                             // error while sending data
-                            fi->ctx->status = CTX_ERROR;
+                            curr_fi->ctx->status = CTX_ERROR;
                             logg("[CTX_ERROR]: upstream failed to send the resposne back.");
                         }
 
-                        cleanup_upstream(worker, fi->ctx);
+                        cleanup_upstream(worker, curr_fi->ctx);
                         continue;
                     }
                 }
@@ -278,54 +315,52 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
             /* Epollout signals when TCP handshake is over, so the socket is ready to be written to */
             /* When epollout signals, we check errno to see if `connect` succeeded */
             if(worker->event_buffers[j].events & EPOLLOUT) {
-                struct FDInfo* fi = worker->event_buffers[j].data.ptr;
-
                 // upstream receives data
-                if (fi->type == FD_UPSTREAM) {
+                if (curr_fi->type == FD_UPSTREAM) {
                     // handle initial connection
-                    if(fi->ctx->status == CTX_CONNECTING_TO_UPSTREAM) {
+                    if(curr_fi->ctx->status == CTX_CONNECTING_TO_UPSTREAM) {
                         int err;
                         socklen_t len = sizeof(err);
 
-                        getsockopt(fi->fd, SOL_SOCKET, SO_ERROR, &err, &len);
+                        getsockopt(curr_fi->fd, SOL_SOCKET, SO_ERROR, &err, &len);
 
                         // connection failed
                         if(err != 0) {
-                            fi->ctx->status = CTX_ERROR;
+                            curr_fi->ctx->status = CTX_ERROR;
                             logg("[CTX_ERROR]: UPSTREAM UP, BUT DENIED CONNECTION.");
-                            cleanup_upstream(worker, fi->ctx);
+                            cleanup_upstream(worker, curr_fi->ctx);
                             continue;
                         }
 
                         logg("2. connection to upstream good");
                         // connection successful
                         if(err == 0) {
-                            fi->ctx->status = CTX_FORWARDING_REQUEST;
+                            curr_fi->ctx->status = CTX_FORWARDING_REQUEST;
                         }
 
                         // fallthrough
                     }
 
                     // sending request from client to upstream
-                    if(fi->ctx->status == CTX_FORWARDING_REQUEST) {
-                        int rv = send_chunk(fi->ctx->upstream->fd, fi->ctx->cli_buf, fi->ctx->cli_buflen, &(fi->ctx->cli_sentoffset));
+                    if(curr_fi->ctx->status == CTX_FORWARDING_REQUEST) {
+                        int rv = send_chunk(curr_fi->ctx->upstream->fd, curr_fi->ctx->cli_buf, curr_fi->ctx->cli_buflen, &(curr_fi->ctx->cli_sentoffset));
 
                         // request succesfully sent
                         if(rv == 1) {
                             logg("3. data successfully sent to upstream.");
-                            fi->ctx->status = CTX_WAITING_RESPONSE;
+                            curr_fi->ctx->status = CTX_WAITING_RESPONSE;
 
                             // upstream doesn't need EPOLLOUT anymore, now only EPOLLIN
                             struct epoll_event ev = {
                                 .events = EPOLLIN | EPOLLET,
-                                .data.ptr = fi->ctx->upstream,
+                                .data.ptr = curr_fi->ctx->upstream,
                             };
-                            epoll_ctl(worker->efd, EPOLL_CTL_MOD, fi->fd, &ev);
+                            epoll_ctl(worker->efd, EPOLL_CTL_MOD, curr_fi->fd, &ev);
                         } else if(rv == -1) {
                             // error while sending data
-                            fi->ctx->status = CTX_ERROR;
+                            curr_fi->ctx->status = CTX_ERROR;
                             logg("[CTX_ERROR]: sending request to upstream failed.");
-                            cleanup_upstream(worker, fi->ctx);
+                            cleanup_upstream(worker, curr_fi->ctx);
                         }
 
                         continue;
@@ -375,7 +410,20 @@ void manage_workers(WorkerProcess* worker_array, int n, int listenerfd) {
     // TODO: hardcoded, should be configurable in the config
     int respawn_attempts = 3;
 
+    // used as a flag for sending signals only once
+    int shutdown_signal_sent = 0;
+
     while(worker_count > 0) {
+        if(master_shutdown && !shutdown_signal_sent) {
+            logg("[Master]: Shutdown signal received. Sending SIGTERM to workers.");
+
+            for(int i=0;i<n;i++) {
+                kill(worker_array[i].pid, SIGTERM);
+            }
+
+            shutdown_signal_sent = 1;
+        }
+
         // reaping all children
         while((p = waitpid(-1, &status, WNOHANG)) > 0) {
             for(int i=0;i<n;i++) {
@@ -452,7 +500,7 @@ void manage_workers(WorkerProcess* worker_array, int n, int listenerfd) {
         sleep(1);
     }
 
-    logg("NO WORKERS ALIVE. TERMINATING...");
+    logg("[Master]: No workers alive. Terminating...");
 }
 
 /* Cleans up the worker process:

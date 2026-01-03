@@ -28,6 +28,21 @@ void logg(const char* format, ...) {
     va_end(args);
 }
 
+/* helper function for constructing sigaction */
+int setup_sigaction(int signum, void (*signal_handler_func)(int), int sa_flags) {
+    struct sigaction sa = {0};
+    sa.sa_handler = signal_handler_func;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = sa_flags;
+
+    if(sigaction(signum, &sa, NULL) == -1) {
+        perror("sigaction");
+        return -1;
+    }
+
+    return 0;
+}
+
 /* blocking send all function */
 ssize_t send_all_blocking(int fd, void* buf, size_t len) { 
     ssize_t total = 0; 

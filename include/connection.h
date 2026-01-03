@@ -7,7 +7,12 @@
 
 #define REQ_BUF_SIZE 4096
 
-enum FDType { FD_CLIENT, FD_UPSTREAM };
+enum FDType { 
+    FD_LISTENER,
+    FD_SHUTDOWN,
+    FD_CLIENT,
+    FD_UPSTREAM
+};
 
 struct FDInfo {
     int fd;

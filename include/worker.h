@@ -8,11 +8,12 @@
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <wait.h>
+#include <sys/eventfd.h>
 
 #include "utils.h"
 #include "upstream.h"
 
-#define MAXEVENTS 1024 // max numbers of fds for the epoll buffer
+#define MAXEVENTS 1024 // max numbers of fds for the epoll set
 
 typedef struct {
     pid_t pid;                                      // process id
@@ -22,11 +23,15 @@ typedef struct {
     int efd;                                        // epoll file descriptor
     struct epoll_event event_buffers[MAXEVENTS];    // event buffer for sockets
 
+    /* Control shutdown fd */
+    int shutdown_fd;
+
     /* Connection attributes */
     int num_conn;                                   // current number of CLIENT connections (doesn't count upstream connections)
     struct ConnectionNode* conn_head;               // head of a doubly-linked list full of ConnectionContext structures (for each connection)
 } WorkerProcess;
 
+void master_sighandler(int signum);
 void signal_handler(int signum);
 
 WorkerProcess spawn_worker(int listenerfd, int index);
