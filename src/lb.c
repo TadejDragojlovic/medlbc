@@ -2,8 +2,12 @@
 #include "worker.h"
 #include "server.h"
 
+#include <sys/mman.h>
+
 #define N_WORKERS 1
 #define PORT "3456"
+
+_Atomic uint64_t *rrindex = NULL;
 
 int main(int argc, char* argv[]) {
     int listenerfd;
@@ -16,6 +20,11 @@ int main(int argc, char* argv[]) {
        setup_sigaction(SIGTERM, master_sighandler, SA_RESTART) == -1) {
         exit(EXIT_FAILURE);
     }
+
+    // setup shared memory for the round robin counter
+    rrindex = mmap(NULL, sizeof(*rrindex), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if(rrindex == MAP_FAILED) { perror("mmap rrindex"); exit(EXIT_FAILURE); }
+    atomic_init(rrindex, 0);
 
     // 1. Master process starts up N_WORKERS
     WorkerProcess* worker_array = init_workers(listenerfd, N_WORKERS);

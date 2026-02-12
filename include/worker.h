@@ -9,11 +9,14 @@
 #include <sys/types.h>
 #include <wait.h>
 #include <sys/eventfd.h>
+#include <stdatomic.h>
 
 #include "utils.h"
 #include "upstream.h"
 
 #define MAXEVENTS 1024 // max numbers of fds for the epoll set
+
+extern _Atomic uint64_t* rrindex;
 
 typedef struct {
     pid_t pid;                                      // process id

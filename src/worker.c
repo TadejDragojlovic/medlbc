@@ -190,7 +190,6 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
 
             // new connection
             if(curr_fi->type == FD_LISTENER) {
-                logg("CURR: LISTENER");
                 handle_new_conn(worker, listenerfd);
                 continue;
             }
@@ -243,7 +242,13 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
                     if(curr_fi->ctx->status == CTX_CONNECTING_TO_UPSTREAM) {
                         // connecting to upstream
                         int upstream_sockfd;
-                        if((upstream_sockfd = connect_to_upstream(upstream_servers[0])) == -1) {
+
+                        // round-robin
+                        uint64_t total_rrcounter = atomic_fetch_add(rrindex, 1);
+                        uint64_t curr_rrindex = total_rrcounter % NUM_UPSTREAMS;
+                        // logg("[DEBUG]: (total_rrcounter %lu), (curr_upstreams_idx %lu)", total_rrcounter, curr_rrindex);
+
+                        if((upstream_sockfd = connect_to_upstream(upstream_servers[curr_rrindex])) == -1) {
                             curr_fi->ctx->status = CTX_ERROR;
 
                             // soft reset of the ctx, upstream not defined yet so doesn't need cleaning up
@@ -436,13 +441,13 @@ void manage_workers(WorkerProcess* worker_array, int n, int listenerfd) {
 
                         if(exit_code == 0) {
                             // no respawn, send SIGTERM to others
-                            logg("[WORKER (idx = %d, pid = %d) exited normally (0), graceful exit.", i, p);
+                            logg("[WORKER (idx = %d, pid = %d)]: exited normally (0), graceful exit.", i, p);
 
                             for(int j=0;j<n;j++) {
                                 if(worker_array[j].pid != p) kill(worker_array[j].pid, SIGTERM);
                             }
                         } else {
-                            logg("[WORKER (idx = %d, pid = %d) exited with code %d, respawning...", i, p, exit_code);
+                            logg("[WORKER (idx = %d, pid = %d)]: exited with code %d, respawning...", i, p, exit_code);
 
                             logg("RESPAWNING WORKER...");
                             for(int t=0;t<respawn_attempts;t++) {
@@ -459,7 +464,7 @@ void manage_workers(WorkerProcess* worker_array, int n, int listenerfd) {
                     } else if(WIFSIGNALED(status)) {
                         int sig = WTERMSIG(status);
 
-                        logg("[WORKER (idx = %d, pid = %d) killed by signal %d, respawning...", i, p, sig);
+                        logg("[WORKER (idx = %d, pid = %d)]: killed by signal %d, respawning...", i, p, sig);
 
                         logg("RESPAWNING WORKER...");
                         for(int t=0;t<respawn_attempts;t++) {
@@ -473,7 +478,7 @@ void manage_workers(WorkerProcess* worker_array, int n, int listenerfd) {
                             }
                         }
                     } else {
-                        logg("[WORKER (idx = %d, pid = %d) exited abnormally, respawning...", i, p);
+                        logg("[WORKER (idx = %d, pid = %d)]: exited abnormally, respawning...", i, p);
 
                         logg("RESPAWNING WORKER...");
                         for(int t=0;t<respawn_attempts;t++) {
