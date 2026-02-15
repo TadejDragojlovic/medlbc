@@ -68,6 +68,7 @@ int handle_new_conn(WorkerProcess* worker, int listenerfd);
 
 /* cleanup */
 void cleanup_upstream(WorkerProcess* worker, struct ConnectionContext* ctx);
+void free_client(struct FDInfo* client_fdinfo);
 void cleanup_client(WorkerProcess* worker, struct ConnectionContext* ctx);
 
 #endif

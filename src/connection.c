@@ -62,7 +62,7 @@ void print_ctx_list(WorkerProcess* worker) {
 
 /* Close desired socket, update number of connected clients accordingly */
 void close_client_conn(WorkerProcess* worker, int client_fd) {
-    close(client_fd);
+    if(client_fd > 0) close(client_fd);
     worker->num_conn--;
     logg("Client %d [Worker: %d] hangup!", client_fd, worker->pid);
 }
@@ -122,10 +122,19 @@ int handle_new_conn(WorkerProcess* worker, int listenerfd) {
         }
 
         // info about the file descriptor
-        struct FDInfo* fdinfo = initialize_new_fdinfo_structure(clientfd, FD_CLIENT, NULL); // TODO: error handle
+        struct FDInfo* fdinfo = initialize_new_fdinfo_structure(clientfd, FD_CLIENT, NULL);
+        if(!fdinfo) {
+            perror("malloc fdinfo");
+            close(clientfd);
+            continue;
+        }
 
-        // connection context
-        struct ConnectionContext* ctx = initialize_new_connection_context(fdinfo); // TODO: error handle
+        struct ConnectionContext* ctx = initialize_new_connection_context(fdinfo);
+        if(!ctx) {
+            perror("malloc ctx");
+            free_client(fdinfo);
+            continue;
+        }
         fdinfo->ctx = ctx; // adding connection context to our client fdinfo structure
 
         struct epoll_event ev = {
@@ -134,16 +143,18 @@ int handle_new_conn(WorkerProcess* worker, int listenerfd) {
         };
         if(epoll_ctl(worker->efd, EPOLL_CTL_ADD, clientfd, &ev) < 0) {
             perror("epoll_ctl");
-            close(clientfd);
-            free(fdinfo);
-            free(ctx);
+            free_client(fdinfo);
             continue;
         }
 
         // Adding the ctx node to the workers list
-        if(add_ctx_node(worker, ctx) == NULL) cleanup_client(worker, ctx);
+        if(add_ctx_node(worker, ctx) == NULL) {
+            epoll_ctl(worker->efd, EPOLL_CTL_DEL, fdinfo->fd, NULL);
+            free_client(fdinfo);
+            continue;
+        }
 
-        logg("New connection accepted!");
+        logg("[SERVER]: New connection accepted!");
         worker->num_conn++;
     }
 
@@ -170,6 +181,16 @@ void cleanup_upstream(WorkerProcess* worker, struct ConnectionContext* ctx) {
     ctx->status = CTX_IDLE;
 }
 
+/* frees ctx and the client fdinfo structure, also closes the socket */
+void free_client(struct FDInfo* client_fdinfo) {
+    if(!client_fdinfo) return;
+
+    if(client_fdinfo->fd >= 0) close(client_fdinfo->fd);
+
+    free(client_fdinfo->ctx);
+    free(client_fdinfo);
+}
+
 /* frees and cleans up everything related to the client (fd info, connection ctx, epoll) */
 void cleanup_client(WorkerProcess* worker, struct ConnectionContext* ctx) {
     if(!ctx || !ctx->client) return;
@@ -185,9 +206,5 @@ void cleanup_client(WorkerProcess* worker, struct ConnectionContext* ctx) {
     struct FDInfo* cfi = ctx->client;
     epoll_ctl(worker->efd, EPOLL_CTL_DEL, cfi->fd, NULL);
     close_client_conn(worker, cfi->fd);
-    free(cfi);
-    ctx->client = NULL;
-
-    free(ctx);
-    ctx = NULL;
+    free_client(cfi);
 }

@@ -181,7 +181,6 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
                 logg("[Worker]: Shutdown signal received.");
                 if(listener_active) {
                     epoll_ctl(worker->efd, EPOLL_CTL_DEL, listenerfd, NULL);
-                    // close(listenerfd);
                     listener_active = 0;
                     ewait_timeout = 200;
                 }
@@ -261,7 +260,15 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
                         logg("1. trying to connect to upstream");
 
                         // registering FDInfo for upstream
-                        struct FDInfo* ufi = initialize_new_fdinfo_structure(upstream_sockfd, FD_UPSTREAM, curr_fi->ctx); // TODO: error handle
+                        struct FDInfo* ufi = initialize_new_fdinfo_structure(upstream_sockfd, FD_UPSTREAM, curr_fi->ctx);
+                        if(!ufi) {
+                            perror("malloc upstream fdinfo");
+                            logg("[CTX_ERROR]: error in registering FDInfo for upstream.");
+
+                            curr_fi->ctx->upstream = NULL;
+                            curr_fi->ctx->status = CTX_IDLE;
+                            continue;
+                        }
 
                         curr_fi->ctx->upstream = ufi;
 
@@ -375,7 +382,7 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
         }
 
         // all connections respected, safe shutdown
-        if(start_shutdown && worker->num_conn == 0) {
+        if(start_shutdown && worker->num_conn <= 0) {
             break;
         }
     }
