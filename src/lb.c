@@ -43,15 +43,12 @@ int main(int argc, char* argv[]) {
 }
 
 
-/* TODO: STA RADITI SAD
-1. algoritam za biranje upstream servera za konekciju sa klijentom (round robin load balancing)
-2. client.c ?
+/* TODO:
+1. client.c ?
 
 VECI KORACI: 
 - health check mehanizam
 
 BONUS:
 - citanje config fajla (kao nginx sto radi)
-- graceful exit logika za signale (child procesi)
-    * da li treba da koristim `kill(pid, signal_koji_zelim)` za workere?
 */
