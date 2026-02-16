@@ -9,6 +9,13 @@
 
 _Atomic uint64_t *rrindex = NULL;
 
+void cleanup_master(int listenerfd, _Atomic uint64_t *mem, size_t mem_size, WorkerProcess* worker_array) {
+    if(listenerfd >= 0) close(listenerfd);
+    munmap(mem, mem_size);
+
+    if(worker_array) free(worker_array);
+}
+
 int main(int argc, char* argv[]) {
     int listenerfd;
 
@@ -29,15 +36,15 @@ int main(int argc, char* argv[]) {
     // 1. Master process starts up N_WORKERS
     WorkerProcess* worker_array = init_workers(listenerfd, N_WORKERS);
     if(!worker_array) {
-        // TODO: cleanup
+        cleanup_master(listenerfd, rrindex, sizeof(*rrindex), worker_array);
         exit(1);
     }
 
     // 2. Master process manages workers (monitoring)
     manage_workers(worker_array, N_WORKERS, listenerfd);
 
-    // TODO: cleanup
-    free(worker_array);
+    // 3. Freeing
+    cleanup_master(listenerfd, rrindex, sizeof(*rrindex), worker_array);
 
     return 0;
 }
