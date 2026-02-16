@@ -26,8 +26,9 @@ typedef struct {
     int efd;                                        // epoll file descriptor
     struct epoll_event event_buffers[MAXEVENTS];    // event buffer for sockets
 
-    /* Control shutdown fd */
-    int shutdown_fd;
+    /* Listener and Shutdown file descriptors */
+    struct FDInfo* listener_fdi;
+    struct FDInfo* shutdown_fdi;
 
     /* Connection attributes */
     int num_conn;                                   // current number of CLIENT connections (doesn't count upstream connections)
@@ -43,6 +44,6 @@ void employ_worker(int listenerfd, WorkerProcess* worker);
 WorkerProcess* init_workers(int listenerfd, int n);
 
 void manage_workers(WorkerProcess* worker_array, int n, int listenerfd);
-void cleanup_worker(int listenerfd, WorkerProcess* worker);
+void cleanup_worker(WorkerProcess* worker);
 
 #endif

@@ -61,7 +61,9 @@ WorkerProcess spawn_worker(int listenerfd, int index) {
         if(setup_worker(listenerfd,  &new_worker) == -1) {
             write(pipefd[1], "1", 1);
             close(pipefd[1]);
-            close(listenerfd);
+
+            cleanup_worker(&new_worker);
+            if(listenerfd >= 0) close(listenerfd);
             exit(EXIT_FAILURE);
         } else {
             // success
@@ -69,17 +71,19 @@ WorkerProcess spawn_worker(int listenerfd, int index) {
             close(pipefd[1]);
 
             // making shutdown fd global
-            shutdown_fd_global = new_worker.shutdown_fd;
+            shutdown_fd_global = new_worker.shutdown_fdi->fd;
 
             // signal handling for the worker process
             if(setup_sigaction(SIGINT, worker_sighandler, SA_RESTART) == -1 ||
                setup_sigaction(SIGTERM, worker_sighandler, SA_RESTART) == -1) {
+                cleanup_worker(&new_worker);
+                if(listenerfd >= 0) close(listenerfd);
                 exit(EXIT_FAILURE);
             }
 
             // workers lifecycle
             employ_worker(listenerfd, &new_worker);
-            cleanup_worker(listenerfd, &new_worker);
+            cleanup_worker(&new_worker);
 
             exit(0);
         }
@@ -110,37 +114,49 @@ int setup_worker(int listenerfd, WorkerProcess* worker) {
     worker->num_conn = 0;
     worker->conn_head = NULL;
 
-    // listenerfd
+    // Listener FDInfo structure for the worker
     struct FDInfo *lfi = malloc(sizeof(*lfi));
+    if(!lfi) {
+        perror("malloc listenerfd fdinfo");
+        exit(1);
+    }
     lfi->fd = listenerfd;
     lfi->type = FD_LISTENER;
     lfi->ctx = NULL;
+    worker->listener_fdi = lfi;
 
     struct epoll_event lev = { .events = EPOLLIN, .data.ptr = lfi };
     if(epoll_ctl(worker->efd, EPOLL_CTL_ADD, listenerfd, &lev) == -1) {
         perror("epoll_ctl");
-        close(worker->efd);
+        free(lfi);
         return -1;
     }
 
     // shutdown_fd used for signaling shutdown by master process
-    worker->shutdown_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if(worker->shutdown_fd == -1) {
+    int shutdownfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if(shutdownfd == -1) {
         perror("eventfd");
-        close(worker->efd);
+        free(lfi);
         return -1;
     }
 
+    // Shutdown FDInfo structure for the worker
     struct FDInfo *sfi = malloc(sizeof(*sfi));
-    sfi->fd = worker->shutdown_fd;
+    if(!sfi) {
+        perror("malloc listenerfd fdinfo");
+        free(lfi);
+        exit(1);
+    }
+    sfi->fd = shutdownfd;
     sfi->type = FD_SHUTDOWN;
     sfi->ctx = NULL;
+    worker->shutdown_fdi = sfi;
 
     struct epoll_event sev = { .events = EPOLLIN, .data.ptr = sfi };
-    if(epoll_ctl(worker->efd, EPOLL_CTL_ADD, worker->shutdown_fd, &sev) == -1) {
+    if(epoll_ctl(worker->efd, EPOLL_CTL_ADD, worker->shutdown_fdi->fd, &sev) == -1) {
         perror("epoll_ctl");
-        close(worker->shutdown_fd);
-        close(worker->efd);
+        free(lfi);
+        free(sfi);
         return -1;
     }
 
@@ -176,7 +192,7 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
             // signal on shutdown_fd for graceful exit
             if(curr_fi->type == FD_SHUTDOWN) {
                 uint64_t b;
-                read(worker->shutdown_fd, &b, sizeof(b));
+                read(worker->shutdown_fdi->fd, &b, sizeof(b));
 
                 logg("[Worker]: Shutdown signal received.");
                 if(listener_active) {
@@ -518,7 +534,7 @@ void manage_workers(WorkerProcess* worker_array, int n, int listenerfd) {
 /* Cleans up the worker process:
    - frees the linked list connection contexes for through cleanup_client for each client
    - closes all used sockets */
-void cleanup_worker(int listenerfd, WorkerProcess* worker) {
+void cleanup_worker(WorkerProcess* worker) {
     struct ConnectionNode* curr_node = worker->conn_head;
     
     while(curr_node) {
@@ -528,6 +544,16 @@ void cleanup_worker(int listenerfd, WorkerProcess* worker) {
     }
 
     // logg("Closing epoll fd = %d", worker->efd);
-    close(worker->efd);
-    close(listenerfd); // closes child copy of listenerfd
+    if(worker->efd >= 0) close(worker->efd);
+
+    // closes child copy of listenerfd
+    if(worker->listener_fdi && worker->listener_fdi->fd >= 0)
+        close(worker->listener_fdi->fd);
+
+    if(worker->shutdown_fdi && worker->shutdown_fdi->fd >= 0)
+        close(worker->shutdown_fdi->fd);
+
+    // free FDInfo structures
+    if(worker->listener_fdi) free(worker->listener_fdi);
+    if(worker->shutdown_fdi) free(worker->shutdown_fdi);
 }
