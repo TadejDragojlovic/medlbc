@@ -170,7 +170,7 @@ int setup_worker(int listenerfd, WorkerProcess* worker) {
     lfi->ctx = NULL;
     worker->listener_fdi = lfi;
 
-    struct epoll_event lev = { .events = EPOLLIN, .data.ptr = lfi };
+    struct epoll_event lev = { .events = EPOLLIN | EPOLLEXCLUSIVE, .data.ptr = lfi };
     if(epoll_ctl(worker->efd, EPOLL_CTL_ADD, listenerfd, &lev) == -1) {
         perror("epoll_ctl");
         free(lfi);
