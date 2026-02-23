@@ -43,6 +43,8 @@ struct ConnectionContext {
     char up_buf[REQ_BUF_SIZE];      // buffer to store upstream response
     size_t up_buflen;
     size_t up_sentoffset;           // offset for bytes sent from upstream buffer
+
+    int upstream_connection_attempts;
 };
 
 /* wrapper for a node of a doubly linked list;

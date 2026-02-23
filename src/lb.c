@@ -49,10 +49,7 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
-
 /* TODO:
-1. client.c ?
-
 VECI KORACI: 
 - health check mehanizam
 

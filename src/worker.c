@@ -29,6 +29,51 @@ void worker_sighandler(int signum) {
     }
 }
 
+/* Helper function, tries NUM_UPSTREAMS times to connect, returns -1 on fail */
+int attempt_upstream_connection(WorkerProcess* worker, struct ConnectionContext* ctx) {
+    while(ctx->upstream_connection_attempts < NUM_UPSTREAMS) {
+        // round-robin
+        uint64_t total_rrcounter = atomic_fetch_add(rrindex, 1);
+        uint64_t curr_rrindex = total_rrcounter % NUM_UPSTREAMS;
+        // logg("[DEBUG]: (total_rrcounter %lu), (curr_upstreams_idx %lu)", total_rrcounter, curr_rrindex);
+
+        int upstream_fd = connect_to_upstream(upstream_servers[curr_rrindex]);
+        if(upstream_fd == -1) {
+            ctx->upstream_connection_attempts++;
+            continue; // try again
+        }
+
+        // registering FDInfo for upstream
+        struct FDInfo* ufi = initialize_new_fdinfo_structure(upstream_fd, FD_UPSTREAM, ctx);
+        if(!ufi) {
+            perror("malloc upstream fdinfo");
+            logg("[CTX_ERROR]: error in registering FDInfo for upstream.");
+
+            ctx->upstream = NULL;
+            ctx->status = CTX_IDLE;
+            continue;
+        }
+        ctx->upstream = ufi;
+
+        // nonblocking socket for upstream
+        struct epoll_event ev = {
+            .events = EPOLLOUT | EPOLLET,
+            .data.ptr = ufi,
+        };
+        if(epoll_ctl(worker->efd, EPOLL_CTL_ADD, upstream_fd, &ev) < 0) {
+            perror("epoll_ctl upstream");
+            free(ufi);
+            close(upstream_fd);
+            ctx->upstream_connection_attempts++;
+            continue;
+        }
+
+        return 0;
+    }
+
+    return -1;
+}
+
 /* Returns WorkerProcess that is already setup if everything goes well,
 otherwise it returns WorkerProcess that has "pid" attribute set to -1, error;
 utilizing pipe to obtain communication between children and parent */
@@ -217,9 +262,16 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
                     cleanup_client(worker, curr_fi->ctx);
                 } else if(curr_fi->type == FD_UPSTREAM) {
                     // upstream hangup
-                    curr_fi->ctx->status = CTX_ERROR;
-                    logg("[CTX_ERROR]: UPSTREAM NOT UP.");
-                    cleanup_upstream(worker, curr_fi->ctx);
+                    struct ConnectionContext* ctx = curr_fi->ctx;
+                    cleanup_upstream(worker, ctx);
+
+                    ctx->upstream_connection_attempts++;
+                    ctx->status = CTX_CONNECTING_TO_UPSTREAM;
+
+                    if(attempt_upstream_connection(worker, ctx) == -1) {
+                        logg("[CTX_ERROR]: All upstreams are down.");
+                        cleanup_client(worker, ctx);
+                    }
                 }
 
                 continue;
@@ -228,75 +280,34 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
             // data ready to be read
             if(worker->event_buffers[j].events & EPOLLIN) {
                 // client has data ready to be read
-                if(curr_fi->type == FD_CLIENT) {
+                if(curr_fi->type == FD_CLIENT &&
+                   curr_fi->ctx->status == CTX_IDLE) {
 
-                    // so far client has been idle
-                    if(curr_fi->ctx->status == CTX_IDLE) {
-                        // persistent read for epollet
-                        ssize_t total = read_all(curr_fi->fd, curr_fi->ctx->cli_buf, REQ_BUF_SIZE);
+                    // persistent read for epollet
+                    ssize_t total = read_all(curr_fi->fd, curr_fi->ctx->cli_buf, REQ_BUF_SIZE);
 
-                        if(total == 0) { // connection closed by client
-                            curr_fi->ctx->status = CTX_ERROR;
-                            logg("[CTX_ERROR]: client closed connection.");
-                            cleanup_client(worker, curr_fi->ctx);
-                            continue;
-                        } else if(total < 0) { // error during read
-                            curr_fi->ctx->status = CTX_ERROR;
-                            logg("[CTX_ERROR]: encountered error while reading client request, closing connection.");
-                            cleanup_client(worker, curr_fi->ctx);
-                            continue;
-                        }
-
-                        // otherwise, read successfully
-                        curr_fi->ctx->cli_buflen = total;
-
-                        curr_fi->ctx->status = CTX_CONNECTING_TO_UPSTREAM;
-                    }
-
-                    // fallthrough from CTX_IDLE
-                    if(curr_fi->ctx->status == CTX_CONNECTING_TO_UPSTREAM) {
-                        // connecting to upstream
-                        int upstream_sockfd;
-
-                        // round-robin
-                        uint64_t total_rrcounter = atomic_fetch_add(rrindex, 1);
-                        uint64_t curr_rrindex = total_rrcounter % NUM_UPSTREAMS;
-                        // logg("[DEBUG]: (total_rrcounter %lu), (curr_upstreams_idx %lu)", total_rrcounter, curr_rrindex);
-
-                        if((upstream_sockfd = connect_to_upstream(upstream_servers[curr_rrindex])) == -1) {
-                            curr_fi->ctx->status = CTX_ERROR;
-
-                            // soft reset of the ctx, upstream not defined yet so doesn't need cleaning up
-                            logg("[CTX_ERROR]: error in trying to establish a connection to upstream.");
-                            curr_fi->ctx->upstream = NULL;
-                            curr_fi->ctx->status = CTX_IDLE;
-                            continue;
-                        }
-
-                        logg("1. trying to connect to upstream");
-
-                        // registering FDInfo for upstream
-                        struct FDInfo* ufi = initialize_new_fdinfo_structure(upstream_sockfd, FD_UPSTREAM, curr_fi->ctx);
-                        if(!ufi) {
-                            perror("malloc upstream fdinfo");
-                            logg("[CTX_ERROR]: error in registering FDInfo for upstream.");
-
-                            curr_fi->ctx->upstream = NULL;
-                            curr_fi->ctx->status = CTX_IDLE;
-                            continue;
-                        }
-
-                        curr_fi->ctx->upstream = ufi;
-
-                        // nonblocking socket for upstream
-                        struct epoll_event ev = {
-                            .events = EPOLLOUT | EPOLLET,
-                            .data.ptr = ufi,
-                        };
-                        epoll_ctl(worker->efd, EPOLL_CTL_ADD, upstream_sockfd, &ev);
+                    // either error during read, or client closed the connection
+                    if(total <= 0) {
+                        if(total < 0) logg("[CTX_ERROR]: encountered error while reading client request, closing connection.");
+                        else logg("[CTX_ERROR]: client closed connection.");
+                        cleanup_client(worker, curr_fi->ctx);
                         continue;
                     }
-                } else if(curr_fi->type == FD_UPSTREAM) {
+
+                    curr_fi->ctx->cli_buflen = total;
+                    curr_fi->ctx->status = CTX_CONNECTING_TO_UPSTREAM;
+                    curr_fi->ctx->upstream_connection_attempts = 0;
+
+                    // Trying to connect to upstream
+                    if (attempt_upstream_connection(worker, curr_fi->ctx) == -1) {
+                        logg("[CTX_ERROR]: TODO...");
+                        cleanup_client(worker, curr_fi->ctx);
+                    }
+
+                    continue;
+                }
+
+                if(curr_fi->type == FD_UPSTREAM) {
 
                     // returning the response to client
                     if(curr_fi->ctx->status == CTX_WAITING_RESPONSE) {
@@ -354,9 +365,19 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
 
                         // connection failed
                         if(err != 0) {
-                            curr_fi->ctx->status = CTX_ERROR;
-                            logg("[CTX_ERROR]: UPSTREAM UP, BUT DENIED CONNECTION.");
-                            cleanup_upstream(worker, curr_fi->ctx);
+                            logg("[CTX_ERROR]: Upstream denied connection (err: %d), trying a different upstream...", err);
+                            struct ConnectionContext* ctx = curr_fi->ctx;
+
+                            cleanup_upstream(worker, ctx);
+
+                            ctx->upstream_connection_attempts++;
+                            ctx->status = CTX_CONNECTING_TO_UPSTREAM;
+
+                            if (attempt_upstream_connection(worker, ctx) == -1) {
+                                logg("[CTX_ERROR]: All upstreams are down.");
+                                cleanup_client(worker, ctx);
+                            }
+
                             continue;
                         }
 
