@@ -294,6 +294,9 @@ void employ_worker(int listenerfd, WorkerProcess* worker) {
                         continue;
                     }
 
+                    // Request input sanitization
+                    if(is_empty(curr_fi->ctx->cli_buf)) continue;
+
                     curr_fi->ctx->cli_buflen = total;
                     curr_fi->ctx->status = CTX_CONNECTING_TO_UPSTREAM;
                     curr_fi->ctx->upstream_connection_attempts = 0;

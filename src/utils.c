@@ -125,3 +125,15 @@ int send_chunk(int fd, void* buf, size_t len, size_t *sent) {
     // everything sent successfully
     return 1;
 }
+
+/* Returns 1 if the buffer is empty, otherwise 0 */
+int is_empty(unsigned char* buf) {
+    if(strlen(buf) == 0) return 1;
+
+    while(*buf) {
+        if(!isspace(*buf)) return 0;
+        buf++;
+    }
+
+    return 1;
+}

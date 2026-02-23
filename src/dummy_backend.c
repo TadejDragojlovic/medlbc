@@ -49,7 +49,7 @@ int main(int argc, char* argv[]) {
 
                 // prefixing string: "[RESPONSE]:"
                 char nb[BUF_SIZE];
-                int total_buf_size = snprintf(nb, sizeof(nb), "[RESPONSE]: %.*s\n", (int)nbytes, buf);
+                int total_buf_size = snprintf(nb, sizeof(nb), "[RESPONSE]: %.*s", (int)nbytes, buf);
 
                 total_buf_size = (total_buf_size > BUF_SIZE) ? BUF_SIZE-1 : total_buf_size;
                 if(send_all_blocking(clientfd, nb, total_buf_size) == -1) {
