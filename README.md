@@ -7,11 +7,28 @@
 
 <br>
 
-## Implemented functionalities
+## Implemented features
+- Event-driven concurrency via `epoll`: Utilizes linux **epoll** in *edge-triggered* mode to manage thousands of concurrent connections within a single thread (per worker)
+- Scalable master-worker model: High-availability architecture where the master process manages lifecycle and health of worker processes
+- TCP Load balancing: Efficiently distributes traffic between multiple backends (upstream servers) 
+- Round-robin implementation: Uses shared memory and atomic operations to distribute load without the overhead of mutexes
+- Graceful shutdown: Implements *self-pipe* with `eventfd` to ensure workers finish active tasks before exiting
+- Fault tolerance: Master process automatically detects worker crashes and attempts to spawn replacements immediately
 
 <br>
 
 ## Architecture
+1. I/O Multiplexing & Non-blocking IO
+    - The core of each worker is an asynchronous event loop. By setting all sockets to `O_NONBLOCK` and using `epoll`, the balancer avoids the "one thread per connection" overhead. This allows the system to remain responsive even under high load.
+2. NGINX like Process Management
+    - **Master** process:
+        * Responsible for initialization, signal handling and worker lifecycle management. It creates the shared memory segment and the initial listener socket.
+    - **Worker** process:
+        * They inherit the listener socket and execute the event loop. Since workers are separate processes, a segmentation fault in one worker does not bring down the entire load balancer.
+3. Inter-Process Synchronization
+    - To maintain a global Round-Robin index without inter-process locks, I implemented a shared memory region. This ensures that even with multiple workers running on different CPU cores, the traffic distribution remains balanced and thread-safe at the hardware level.
+4. Connection State Machine
+    - To handle the asynchronous nature of connecting to upstreams while simultaneously reading from clients, this system uses a custom structure `ConnectionContext` state machine. This tracks the lifecycle of every request from `CTX_IDLE` to `CTX_SUCCESS` without blocking the worker's exection flow.
 
 <br>
 
