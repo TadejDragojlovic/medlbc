@@ -31,8 +31,8 @@
 <br>
 
 ## Future Roadmap
-- [] Config file: similar to nginx, use this config file to setup upstreams, set connection boundaries, or other lb behaviors
-- [] Health checks: mechanism that frequently checks if the upserver is responsive
-- [] Weighted Round-robin or other load balancing algorithms
+- [ ] Config file: similar to nginx, use this config file to setup upstreams, set connection boundaries, or other lb behaviors
+- [ ] Health checks: mechanism that frequently checks if the upserver is responsive
+- [ ] Weighted Round-robin or other load balancing algorithms
 
 <br>
